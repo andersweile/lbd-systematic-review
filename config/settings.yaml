@@ -10,6 +10,17 @@ download:
   timeout: 30
   max_retries: 3
   delay_seconds: 1.0
+  retry_delay_403: 5.0  # Extra delay for 403 errors (potential rate limiting)
+
+# Semantic Scholar batch API
+s2_api:
+  batch_size: 500
+  delay_seconds: 1.0
+
+# Unpaywall settings
+unpaywall:
+  email: "aweilelarsen@gmail.com"
+  delay_seconds: 0.1
 
 # Google Scholar settings
 scholar:

@@ -3,7 +3,9 @@
 import json
 import sys
 import time
+from collections import Counter
 from pathlib import Path
+from urllib.parse import urlparse
 
 import click
 from tqdm import tqdm
@@ -13,16 +15,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.core.file_paths import PDF_DIR, get_manifest_path, get_source_json_path, load_settings
 from src.core.log import get_logger
-from src.download import download_pdf
+from src.doi import batch_lookup_dois, extract_dois_from_papers
+from src.download import download_pdf, get_transform_urls
 from src.manifest import (
     count_by_status,
+    get_by_status,
+    get_papers_with_doi,
     get_pending,
     init_manifest,
     load_manifest,
     save_manifest,
     update_entry,
 )
-from src.scholar import find_pdf_url, setup_proxy
+from src.scholar import find_pdf_url as scholar_find_pdf_url
+from src.scholar import setup_proxy
+from src.unpaywall import find_pdf_url as unpaywall_find_pdf_url
 
 logger = get_logger()
 
@@ -49,6 +56,133 @@ def papers_with_open_access(papers: list[dict]) -> dict[str, str]:
     return result
 
 
+def enrich_dois(papers: list[dict], manifest: dict, settings: dict) -> None:
+    """Phase 0: Extract and look up DOIs, store in manifest.
+
+    Sources (in priority order):
+    1. externalIds.DOI from paper metadata
+    2. DOI extracted from openAccessPdf.disclaimer text
+    3. Semantic Scholar batch API lookup
+    """
+    s2_settings = settings.get("s2_api", {})
+    batch_size = s2_settings.get("batch_size", 500)
+    s2_delay = s2_settings.get("delay_seconds", 1.0)
+
+    # Extract DOIs from paper metadata (externalIds + disclaimer)
+    local_dois = extract_dois_from_papers(papers)
+    new_local = 0
+    for pid, doi in local_dois.items():
+        if pid in manifest and not manifest[pid].get("doi"):
+            manifest[pid]["doi"] = doi
+            new_local += 1
+
+    click.echo(f"  DOIs from metadata/disclaimer: {len(local_dois)} total, {new_local} newly added to manifest")
+
+    # Find papers still missing DOIs
+    missing_doi_ids = [pid for pid in manifest if not manifest[pid].get("doi")]
+
+    if missing_doi_ids:
+        click.echo(f"  Looking up {len(missing_doi_ids)} papers via S2 batch API...")
+        api_dois = batch_lookup_dois(missing_doi_ids, batch_size=batch_size, delay=s2_delay)
+
+        new_api = 0
+        for pid, doi in api_dois.items():
+            if pid in manifest and not manifest[pid].get("doi"):
+                manifest[pid]["doi"] = doi
+                new_api += 1
+        click.echo(f"  DOIs from S2 batch API: {len(api_dois)} found, {new_api} newly added")
+
+    total_with_doi = sum(1 for entry in manifest.values() if entry.get("doi"))
+    click.echo(f"  Total papers with DOI: {total_with_doi}/{len(manifest)}")
+
+
+def run_unpaywall_phase(manifest: dict, settings: dict, dl_timeout: int, dl_retries: int, dl_delay: float) -> None:
+    """Phase 2: Query Unpaywall for pending papers that have DOIs."""
+    unpaywall_settings = settings.get("unpaywall", {})
+    email = unpaywall_settings.get("email", "")
+    up_delay = unpaywall_settings.get("delay_seconds", 0.1)
+
+    if not email:
+        click.echo("  Skipping Unpaywall: no email configured. Set unpaywall.email in settings.yaml.")
+        return
+
+    # Get pending papers with DOIs
+    papers_with_dois = get_papers_with_doi(manifest, statuses=["pending"])
+
+    if not papers_with_dois:
+        click.echo("  No pending papers with DOIs for Unpaywall lookup.")
+        return
+
+    click.echo(f"  Querying Unpaywall for {len(papers_with_dois)} papers...")
+    downloaded = 0
+    no_pdf = 0
+
+    for paper_id, doi in tqdm(papers_with_dois.items(), desc="Unpaywall", unit="paper"):
+        pdf_url = unpaywall_find_pdf_url(doi, email=email, delay=up_delay)
+
+        if pdf_url is None:
+            no_pdf += 1
+            continue  # Leave as pending for Scholar phase
+
+        output_path = PDF_DIR / f"{paper_id}.pdf"
+        success = download_pdf(pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
+
+        if success:
+            update_entry(
+                manifest, paper_id,
+                status="downloaded",
+                source="unpaywall",
+                url=pdf_url,
+                file_path=str(output_path.relative_to(PDF_DIR.parent.parent)),
+            )
+            downloaded += 1
+        else:
+            # Don't mark as failed — Scholar can still try
+            logger.debug(f"Unpaywall PDF download failed for {doi}, leaving as pending")
+
+        time.sleep(dl_delay)
+
+    click.echo(f"  Unpaywall: {downloaded} downloaded, {no_pdf} no PDF found (still pending)")
+
+
+def run_url_transform_phase(manifest: dict, dl_timeout: int, dl_retries: int, dl_delay: float) -> None:
+    """Phase 3: Retry failed papers using domain-specific URL transforms."""
+    # Find failed papers that have a URL we can try to transform
+    candidates = []
+    for pid, entry in manifest.items():
+        if entry["status"] == "failed" and entry.get("url"):
+            transforms = get_transform_urls(entry["url"])
+            if transforms:
+                candidates.append((pid, entry["url"], transforms))
+
+    if not candidates:
+        click.echo("  No failed papers with transformable URLs.")
+        return
+
+    click.echo(f"  Trying URL transforms for {len(candidates)} papers...")
+    downloaded = 0
+
+    for paper_id, original_url, alt_urls in tqdm(candidates, desc="URL Transforms", unit="paper"):
+        for alt_url in alt_urls:
+            output_path = PDF_DIR / f"{paper_id}.pdf"
+            success = download_pdf(alt_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
+
+            if success:
+                update_entry(
+                    manifest, paper_id,
+                    status="downloaded",
+                    source="url_transform",
+                    url=alt_url,
+                    file_path=str(output_path.relative_to(PDF_DIR.parent.parent)),
+                )
+                downloaded += 1
+                break  # Stop trying alternatives once one works
+
+            time.sleep(dl_delay)
+
+    click.echo(f"  URL transforms: {downloaded} downloaded")
+
+
 @click.group()
 def cli():
     """LBD Systematic Review - PDF Download Pipeline."""
@@ -61,7 +195,19 @@ def cli():
 @click.option("--scholar-delay", type=float, default=None, help="Seconds between Google Scholar requests.")
 @click.option("--use-proxy", is_flag=True, help="Use free proxies for Google Scholar requests.")
 @click.option("--retry-failed", is_flag=True, help="Retry papers marked as 'failed' (reset them to pending).")
-def download(open_access_only: bool, scholar_only: bool, scholar_delay: float | None, use_proxy: bool, retry_failed: bool):
+@click.option("--retry-not-found", is_flag=True, help="Retry papers marked as 'not_found' (reset them to pending).")
+@click.option("--unpaywall-email", type=str, default=None, help="Email for Unpaywall API (overrides settings.yaml).")
+@click.option("--skip-unpaywall", is_flag=True, help="Skip the Unpaywall phase.")
+def download(
+    open_access_only: bool,
+    scholar_only: bool,
+    scholar_delay: float | None,
+    use_proxy: bool,
+    retry_failed: bool,
+    retry_not_found: bool,
+    unpaywall_email: str | None,
+    skip_unpaywall: bool,
+):
     """Download PDFs for all papers in the source dataset."""
     settings = load_settings()
     manifest_path = get_manifest_path()
@@ -74,6 +220,10 @@ def download(open_access_only: bool, scholar_only: bool, scholar_delay: float | 
     dl_timeout = dl_settings.get("timeout", 30)
     dl_retries = dl_settings.get("max_retries", 3)
 
+    # Override unpaywall email if provided via CLI
+    if unpaywall_email:
+        settings.setdefault("unpaywall", {})["email"] = unpaywall_email
+
     # Load papers and manifest
     papers = load_papers()
     manifest = load_manifest(manifest_path)
@@ -82,14 +232,27 @@ def download(open_access_only: bool, scholar_only: bool, scholar_delay: float | 
 
     click.echo(f"Loaded {len(papers)} papers. Manifest: {dict(count_by_status(manifest))}")
 
-    # Optionally reset failed papers to pending
+    # Optionally reset failed/not_found papers to pending
     if retry_failed:
-        failed_ids = [pid for pid, entry in manifest.items() if entry["status"] == "failed"]
+        failed_ids = get_by_status(manifest, "failed")
         for pid in failed_ids:
             manifest[pid]["status"] = "pending"
         if failed_ids:
             click.echo(f"Reset {len(failed_ids)} failed papers to pending.")
             save_manifest(manifest, manifest_path)
+
+    if retry_not_found:
+        nf_ids = get_by_status(manifest, "not_found")
+        for pid in nf_ids:
+            manifest[pid]["status"] = "pending"
+        if nf_ids:
+            click.echo(f"Reset {len(nf_ids)} not_found papers to pending.")
+            save_manifest(manifest, manifest_path)
+
+    # --- Phase 0: DOI Enrichment ---
+    click.echo("\n--- Phase 0: DOI Enrichment ---")
+    enrich_dois(papers, manifest, settings)
+    save_manifest(manifest, manifest_path)
 
     # --- Phase 1: Open Access downloads ---
     if not scholar_only:
@@ -126,12 +289,24 @@ def download(open_access_only: bool, scholar_only: bool, scholar_delay: float | 
         else:
             click.echo("\nNo pending open access papers to download.")
 
-    # --- Phase 2: Google Scholar ---
+    # --- Phase 2: Unpaywall ---
+    if not open_access_only and not skip_unpaywall:
+        click.echo("\n--- Phase 2: Unpaywall ---")
+        run_unpaywall_phase(manifest, settings, dl_timeout, dl_retries, dl_delay)
+        save_manifest(manifest, manifest_path)
+
+    # --- Phase 3: URL Transforms ---
+    if not scholar_only and not open_access_only:
+        click.echo("\n--- Phase 3: URL Transforms ---")
+        run_url_transform_phase(manifest, dl_timeout, dl_retries, dl_delay)
+        save_manifest(manifest, manifest_path)
+
+    # --- Phase 4: Google Scholar ---
     if not open_access_only:
         pending_ids = get_pending(manifest)
 
         if pending_ids:
-            click.echo(f"\n--- Phase 2: Google Scholar ({len(pending_ids)} papers) ---")
+            click.echo(f"\n--- Phase 4: Google Scholar ({len(pending_ids)} papers) ---")
 
             if use_proxy or scholar_settings.get("use_proxy", False):
                 setup_proxy()
@@ -142,14 +317,20 @@ def download(open_access_only: bool, scholar_only: bool, scholar_delay: float | 
 
             for paper_id in tqdm(pending_ids, desc="Google Scholar", unit="paper"):
                 title = manifest[paper_id]["title"]
-                pdf_url = find_pdf_url(title, delay=scholar_delay)
+                pdf_url = scholar_find_pdf_url(title, delay=scholar_delay)
 
                 if pdf_url is None:
                     update_entry(manifest, paper_id, status="not_found", source="google_scholar")
                     not_found += 1
                 else:
                     output_path = PDF_DIR / f"{paper_id}.pdf"
-                    success = download_pdf(url=pdf_url, output_path=output_path, timeout=dl_timeout, max_retries=dl_retries)
+                    success = download_pdf(
+                        url=pdf_url,
+                        output_path=output_path,
+                        timeout=dl_timeout,
+                        max_retries=dl_retries,
+                        referer="https://scholar.google.com/",
+                    )
 
                     if success:
                         update_entry(
@@ -193,6 +374,10 @@ def stats():
     click.echo(f"  Not found:   {counts.get('not_found', 0)}")
     click.echo(f"  Failed:      {counts.get('failed', 0)}")
 
+    # DOI coverage
+    with_doi = sum(1 for entry in manifest.values() if entry.get("doi"))
+    click.echo(f"\nDOI coverage: {with_doi}/{total} ({100 * with_doi / total:.0f}%)")
+
     # Source breakdown for downloaded papers
     sources: dict[str, int] = {}
     for entry in manifest.values():
@@ -204,6 +389,21 @@ def stats():
         click.echo("\nDownloaded by source:")
         for src, count in sorted(sources.items()):
             click.echo(f"  {src}: {count}")
+
+    # Failure domain breakdown
+    domain_counts: Counter[str] = Counter()
+    for entry in manifest.values():
+        if entry["status"] == "failed" and entry.get("url"):
+            parsed = urlparse(entry["url"])
+            domain = parsed.hostname or "unknown"
+            # Simplify domain (remove www. prefix)
+            domain = domain.removeprefix("www.")
+            domain_counts[domain] += 1
+
+    if domain_counts:
+        click.echo("\nFailed downloads by domain:")
+        for domain, count in domain_counts.most_common(15):
+            click.echo(f"  {domain}: {count}")
 
 
 if __name__ == "__main__":

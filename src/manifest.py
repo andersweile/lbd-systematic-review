@@ -41,6 +41,7 @@ def init_manifest(papers: list[dict], manifest: dict[str, Any]) -> dict[str, Any
                 "title": paper.get("title", ""),
                 "authors": author_str,
                 "year": paper.get("year"),
+                "doi": None,
                 "status": "pending",
                 "source": None,
                 "url": None,
@@ -88,3 +89,26 @@ def get_pending(manifest: dict[str, Any]) -> list[str]:
 def get_failed(manifest: dict[str, Any]) -> list[str]:
     """Get list of paper IDs with 'failed' status."""
     return [pid for pid, entry in manifest.items() if entry["status"] == "failed"]
+
+
+def get_by_status(manifest: dict[str, Any], status: str) -> list[str]:
+    """Get list of paper IDs with a given status."""
+    return [pid for pid, entry in manifest.items() if entry["status"] == status]
+
+
+def get_papers_with_doi(manifest: dict[str, Any], statuses: list[str] | None = None) -> dict[str, str]:
+    """Get {paperId: doi} for papers that have a DOI set.
+
+    Args:
+        manifest: The manifest dict.
+        statuses: If provided, only include papers with one of these statuses.
+
+    Returns:
+        Dict mapping paperId -> DOI.
+    """
+    result = {}
+    for pid, entry in manifest.items():
+        doi = entry.get("doi")
+        if doi and (statuses is None or entry["status"] in statuses):
+            result[pid] = doi
+    return result

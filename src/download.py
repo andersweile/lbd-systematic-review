@@ -1,7 +1,9 @@
 """HTTP download with retries and PDF validation."""
 
+import re
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 
@@ -9,10 +11,18 @@ from src.core.log import get_logger
 
 logger = get_logger()
 
-# Common headers to avoid 403s from academic publishers
+# Comprehensive browser headers to avoid 403s from academic publishers
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/pdf,*/*",
+    "Accept": "application/pdf,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "DNT": "1",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
 }
 
 
@@ -21,16 +31,32 @@ def is_pdf(content: bytes) -> bool:
     return content[:5] == b"%PDF-"
 
 
-def download_pdf(url: str, output_path: Path, timeout: int = 30, max_retries: int = 3) -> bool:
+def download_pdf(url: str, output_path: Path, timeout: int = 30, max_retries: int = 3, referer: str | None = None) -> bool:
     """Download a PDF from url to output_path with retries.
 
-    Returns True if download succeeded and file is a valid PDF.
+    Args:
+        url: URL to download PDF from
+        output_path: Path to save the PDF file
+        timeout: Timeout in seconds for HTTP request
+        max_retries: Number of retry attempts
+        referer: Optional Referer header (e.g., "https://scholar.google.com/" for Scholar results)
+
+    Returns:
+        True if download succeeded and file is a valid PDF.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Use a session for connection pooling and cookie persistence
+    session = requests.Session()
+
+    # Build headers with optional referer
+    headers = HEADERS.copy()
+    if referer:
+        headers["Referer"] = referer
+
     for attempt in range(max_retries):
         try:
-            resp = requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
+            resp = session.get(url, headers=headers, timeout=timeout, allow_redirects=True)
             resp.raise_for_status()
 
             # Validate it's actually a PDF
@@ -42,6 +68,20 @@ def download_pdf(url: str, output_path: Path, timeout: int = 30, max_retries: in
             output_path.write_bytes(resp.content)
             return True
 
+        except requests.exceptions.HTTPError as e:
+            # Log response headers for 403 errors to help debug
+            if e.response is not None and e.response.status_code == 403:
+                logger.error(f"403 Forbidden for {url}")
+                logger.debug(f"Response headers: {dict(e.response.headers)}")
+
+            wait = 2**attempt
+            if attempt < max_retries - 1:
+                logger.warning(f"Attempt {attempt + 1} failed for {url}: {e}. Retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                logger.error(f"All {max_retries} attempts failed for {url}: {e}")
+                return False
+
         except requests.exceptions.RequestException as e:
             wait = 2**attempt
             if attempt < max_retries - 1:
@@ -52,3 +92,42 @@ def download_pdf(url: str, output_path: Path, timeout: int = 30, max_retries: in
                 return False
 
     return False
+
+
+def get_transform_urls(url: str) -> list[str]:
+    """Generate alternative download URLs for known academic domains.
+
+    Some open access URLs point to HTML landing pages rather than direct PDF links.
+    This function returns transformed URLs that are more likely to yield a PDF.
+
+    Args:
+        url: Original URL that failed to download.
+
+    Returns:
+        List of alternative URLs to try (may be empty).
+    """
+    parsed = urlparse(url)
+    domain = parsed.hostname or ""
+    path = parsed.path
+    alternatives: list[str] = []
+
+    # PMC: /pmc/articles/PMC12345/ -> europepmc.org PDF
+    if "ncbi.nlm.nih.gov" in domain or "pmc" in domain:
+        pmc_match = re.search(r"(PMC\d+)", path, re.IGNORECASE)
+        if pmc_match:
+            pmc_id = pmc_match.group(1)
+            alternatives.append(f"https://europepmc.org/articles/{pmc_id}?format=pdf")
+
+    # bioRxiv / medRxiv: append .full.pdf if not already present
+    if "biorxiv.org" in domain or "medrxiv.org" in domain:
+        if not path.endswith(".pdf"):
+            clean_path = path.rstrip("/")
+            alternatives.append(f"https://{domain}{clean_path}.full.pdf")
+
+    # MDPI: append /pdf to article URL
+    if "mdpi.com" in domain:
+        if "/pdf" not in path:
+            clean_path = path.rstrip("/")
+            alternatives.append(f"https://{domain}{clean_path}/pdf")
+
+    return alternatives
