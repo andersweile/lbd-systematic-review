@@ -1,0 +1,15 @@
+[project]
+name = "lbd-systematic-review"
+version = "0.1.0"
+description = "PDF download pipeline for LBD systematic review papers"
+requires-python = ">=3.11"
+dependencies = [
+    "click",
+    "requests",
+    "scholarly",
+    "pyyaml",
+    "tqdm",
+]
+
+[tool.ruff]
+line-length = 120

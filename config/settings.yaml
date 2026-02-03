@@ -1,0 +1,17 @@
+# Source data
+source_json: "../automated-discovery_literature-search/results/20260203_110525/papers/category_literature_based_discovery.json"
+
+# Output directories (relative to project root)
+pdf_dir: "data/pdfs"
+manifest_path: "data/manifest.json"
+
+# Download settings
+download:
+  timeout: 30
+  max_retries: 3
+  delay_seconds: 1.0
+
+# Google Scholar settings
+scholar:
+  delay_seconds: 10.0
+  use_proxy: false
