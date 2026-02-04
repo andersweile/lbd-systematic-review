@@ -1,4 +1,4 @@
-"""HTTP download with retries and PDF validation."""
+"""HTTP download with retries, PDF validation, and curl_cffi fallback."""
 
 import re
 import time
@@ -31,27 +31,11 @@ def is_pdf(content: bytes) -> bool:
     return content[:5] == b"%PDF-"
 
 
-def download_pdf(
-    url: str, output_path: Path, timeout: int = 30, max_retries: int = 3, referer: str | None = None
-) -> bool:
-    """Download a PDF from url to output_path with retries.
-
-    Args:
-        url: URL to download PDF from
-        output_path: Path to save the PDF file
-        timeout: Timeout in seconds for HTTP request
-        max_retries: Number of retry attempts
-        referer: Optional Referer header (e.g., "https://scholar.google.com/" for Scholar results)
-
-    Returns:
-        True if download succeeded and file is a valid PDF.
-    """
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Use a session for connection pooling and cookie persistence
+def _download_with_requests(
+    url: str, output_path: Path, timeout: int, max_retries: int, referer: str | None = None
+) -> str:
+    """Try downloading with requests. Returns "ok", "not_pdf", "blocked", or "error"."""
     session = requests.Session()
-
-    # Build headers with optional referer
     headers = HEADERS.copy()
     if referer:
         headers["Referer"] = referer
@@ -61,20 +45,26 @@ def download_pdf(
             resp = session.get(url, headers=headers, timeout=timeout, allow_redirects=True)
             resp.raise_for_status()
 
-            # Validate it's actually a PDF
             if not is_pdf(resp.content):
-                content_type = resp.headers.get("content-type", "")
-                logger.warning(f"Not a PDF (content-type: {content_type}): {url}")
-                return False
+                content_type = resp.headers.get("content-type", "unknown")
+                final_url = resp.url
+                content_len = len(resp.content)
+                logger.warning(f"Not a PDF (content-type: {content_type}, size: {content_len}): {url}")
+                if final_url != url:
+                    logger.debug(f"  Redirected to: {final_url}")
+                logger.debug(f"  First 200 bytes: {resp.content[:200]!r}")
+                return "not_pdf"
 
             output_path.write_bytes(resp.content)
-            return True
+            return "ok"
 
         except requests.exceptions.HTTPError as e:
-            # Log response headers for 403 errors to help debug
             if e.response is not None and e.response.status_code == 403:
-                logger.error(f"403 Forbidden for {url}")
+                server = e.response.headers.get("server", "unknown")
+                cf_ray = e.response.headers.get("cf-ray", "")
+                logger.error(f"403 Forbidden for {url} (server: {server}{', cf-ray: ' + cf_ray if cf_ray else ''})")
                 logger.debug(f"Response headers: {dict(e.response.headers)}")
+                return "blocked"
 
             wait = 2**attempt
             if attempt < max_retries - 1:
@@ -82,7 +72,7 @@ def download_pdf(
                 time.sleep(wait)
             else:
                 logger.error(f"All {max_retries} attempts failed for {url}: {e}")
-                return False
+                return "error"
 
         except requests.exceptions.RequestException as e:
             wait = 2**attempt
@@ -91,9 +81,79 @@ def download_pdf(
                 time.sleep(wait)
             else:
                 logger.error(f"All {max_retries} attempts failed for {url}: {e}")
-                return False
+                return "error"
 
-    return False
+    return "error"
+
+
+def _download_with_curl_cffi(url: str, output_path: Path, timeout: int, referer: str | None = None) -> str:
+    """Fallback download using curl_cffi for Chrome TLS fingerprint. Returns "ok", "not_pdf", or "error"."""
+    try:
+        from curl_cffi import requests as curl_requests
+    except ImportError:
+        logger.debug("curl_cffi not available, skipping fallback")
+        return "error"
+
+    headers = HEADERS.copy()
+    if referer:
+        headers["Referer"] = referer
+
+    try:
+        resp = curl_requests.get(url, headers=headers, timeout=timeout, allow_redirects=True, impersonate="chrome")
+
+        if resp.status_code == 403:
+            logger.error(f"curl_cffi also got 403 for {url}")
+            return "error"
+
+        resp.raise_for_status()
+
+        if not is_pdf(resp.content):
+            content_type = resp.headers.get("content-type", "unknown")
+            logger.warning(f"curl_cffi: Not a PDF (content-type: {content_type}): {url}")
+            return "not_pdf"
+
+        output_path.write_bytes(resp.content)
+        logger.info(f"curl_cffi fallback succeeded for {url}")
+        return "ok"
+
+    except Exception as e:
+        logger.error(f"curl_cffi download failed for {url}: {e}")
+        return "error"
+
+
+def download_pdf(
+    url: str, output_path: Path, timeout: int = 30, max_retries: int = 3, referer: str | None = None
+) -> str:
+    """Download a PDF from url to output_path with retries and curl_cffi fallback.
+
+    Args:
+        url: URL to download PDF from
+        output_path: Path to save the PDF file
+        timeout: Timeout in seconds for HTTP request
+        max_retries: Number of retry attempts
+        referer: Optional Referer header (e.g., "https://scholar.google.com/" for Scholar results)
+
+    Returns:
+        "ok" if download succeeded and file is a valid PDF,
+        "not_pdf" if server returned HTML/non-PDF content,
+        "error" if HTTP/network failure.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    result = _download_with_requests(url, output_path, timeout, max_retries, referer)
+
+    # On 403 (blocked), try curl_cffi with Chrome TLS fingerprint
+    if result == "blocked":
+        logger.info(f"Trying curl_cffi fallback for 403'd URL: {url}")
+        cffi_result = _download_with_curl_cffi(url, output_path, timeout, referer)
+        if cffi_result == "ok":
+            return "ok"
+        if cffi_result == "not_pdf":
+            return "not_pdf"
+        # curl_cffi also failed — normalize "blocked" to "error"
+        return "error"
+
+    return result
 
 
 def get_transform_urls(url: str) -> list[str]:
@@ -165,6 +225,37 @@ def get_transform_urls(url: str) -> list[str]:
     if "academic.oup.com" in domain:
         if "pdfformat" not in path:
             alternatives.append(f"{url}?pdfformat=full")
+
+    # Elsevier/ScienceDirect: /science/article/pii/... -> append /pdfft
+    if "sciencedirect.com" in domain:
+        if "/science/article/pii/" in path and "/pdfft" not in path:
+            clean_url = url.rstrip("/")
+            alternatives.append(f"{clean_url}/pdfft")
+
+    # Wiley: /doi/... -> /doi/pdfdirect/...
+    if "onlinelibrary.wiley.com" in domain:
+        if "/doi/" in path and "/doi/pdfdirect/" not in path:
+            pdf_path = path.replace("/doi/", "/doi/pdfdirect/", 1)
+            alternatives.append(f"https://{domain}{pdf_path}")
+
+    # Taylor & Francis: /doi/abs/ or /doi/full/ -> /doi/pdf/
+    if "tandfonline.com" in domain:
+        if "/doi/abs/" in path:
+            pdf_path = path.replace("/doi/abs/", "/doi/pdf/", 1)
+            alternatives.append(f"https://{domain}{pdf_path}")
+        elif "/doi/full/" in path:
+            pdf_path = path.replace("/doi/full/", "/doi/pdf/", 1)
+            alternatives.append(f"https://{domain}{pdf_path}")
+
+    # Hindawi: article URL -> downloads.hindawi.com/.../article.pdf
+    if "hindawi.com" in domain:
+        # Extract article ID from paths like /journals/journal/year/id/
+        hindawi_match = re.search(r"/journals/([^/]+)/(\d+)/(\d+)", path)
+        if hindawi_match:
+            journal = hindawi_match.group(1)
+            year = hindawi_match.group(2)
+            article_id = hindawi_match.group(3)
+            alternatives.append(f"https://downloads.hindawi.com/journals/{journal}/{year}/{article_id}.pdf")
 
     # doi.org links: resolve and extract the actual publisher URL
     if "doi.org" in domain:

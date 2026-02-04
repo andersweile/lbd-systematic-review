@@ -5,6 +5,7 @@ description = "PDF download pipeline for LBD systematic review papers"
 requires-python = ">=3.11"
 dependencies = [
     "click",
+    "curl_cffi",
     "requests",
     "scholarly",
     "pyyaml",

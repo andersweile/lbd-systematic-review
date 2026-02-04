@@ -7,7 +7,7 @@ manifest_path: "data/manifest.json"
 
 # Download settings
 download:
-  timeout: 30
+  timeout: 60
   max_retries: 3
   delay_seconds: 1.0
   retry_delay_403: 5.0  # Extra delay for 403 errors (potential rate limiting)

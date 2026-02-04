@@ -98,7 +98,7 @@ def enrich_dois(papers: list[dict], manifest: dict, settings: dict) -> None:
 
 
 def run_unpaywall_phase(manifest: dict, settings: dict, dl_timeout: int, dl_retries: int, dl_delay: float) -> None:
-    """Phase 2: Query Unpaywall for pending papers that have DOIs."""
+    """Phase 2: Query Unpaywall for pending/failed papers that have DOIs."""
     unpaywall_settings = settings.get("unpaywall", {})
     email = unpaywall_settings.get("email", "")
     up_delay = unpaywall_settings.get("delay_seconds", 0.1)
@@ -107,11 +107,11 @@ def run_unpaywall_phase(manifest: dict, settings: dict, dl_timeout: int, dl_retr
         click.echo("  Skipping Unpaywall: no email configured. Set unpaywall.email in settings.yaml.")
         return
 
-    # Get pending papers with DOIs
-    papers_with_dois = get_papers_with_doi(manifest, statuses=["pending"])
+    # Get pending AND failed papers with DOIs (failed Phase 1 papers get a second chance)
+    papers_with_dois = get_papers_with_doi(manifest, statuses=["pending", "failed"])
 
     if not papers_with_dois:
-        click.echo("  No pending papers with DOIs for Unpaywall lookup.")
+        click.echo("  No pending/failed papers with DOIs for Unpaywall lookup.")
         return
 
     click.echo(f"  Querying Unpaywall for {len(papers_with_dois)} papers...")
@@ -126,9 +126,9 @@ def run_unpaywall_phase(manifest: dict, settings: dict, dl_timeout: int, dl_retr
             continue  # Leave as pending for Scholar phase
 
         output_path = PDF_DIR / f"{paper_id}.pdf"
-        success = download_pdf(pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
+        result = download_pdf(pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
 
-        if success:
+        if result == "ok":
             update_entry(
                 manifest,
                 paper_id,
@@ -167,9 +167,9 @@ def run_url_transform_phase(manifest: dict, dl_timeout: int, dl_retries: int, dl
     for paper_id, original_url, alt_urls in tqdm(candidates, desc="URL Transforms", unit="paper"):
         for alt_url in alt_urls:
             output_path = PDF_DIR / f"{paper_id}.pdf"
-            success = download_pdf(alt_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
+            result = download_pdf(alt_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
 
-            if success:
+            if result == "ok":
                 update_entry(
                     manifest,
                     paper_id,
@@ -284,8 +284,8 @@ def run_repo_api_phase(
 
         if pdf_url:
             output_path = PDF_DIR / f"{pid}.pdf"
-            success = download_pdf(pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
-            if success:
+            result = download_pdf(pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
+            if result == "ok":
                 update_entry(
                     manifest,
                     pid,
@@ -315,8 +315,8 @@ def run_repo_api_phase(
 
         if pdf_url:
             output_path = PDF_DIR / f"{pid}.pdf"
-            success = download_pdf(pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
-            if success:
+            result = download_pdf(pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
+            if result == "ok":
                 update_entry(
                     manifest,
                     pid,
@@ -345,8 +345,8 @@ def run_repo_api_phase(
 
         if pdf_url:
             output_path = PDF_DIR / f"{pid}.pdf"
-            success = download_pdf(pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
-            if success:
+            result = download_pdf(pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
+            if result == "ok":
                 update_entry(
                     manifest,
                     pid,
@@ -376,8 +376,8 @@ def run_repo_api_phase(
 
         if pdf_url:
             output_path = PDF_DIR / f"{pid}.pdf"
-            success = download_pdf(pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
-            if success:
+            result = download_pdf(pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
+            if result == "ok":
                 update_entry(
                     manifest,
                     pid,
@@ -417,8 +417,8 @@ def run_crossref_phase(manifest: dict, settings: dict, dl_timeout: int, dl_retri
 
         if pdf_url:
             output_path = PDF_DIR / f"{pid}.pdf"
-            success = download_pdf(pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
-            if success:
+            result = download_pdf(pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
+            if result == "ok":
                 update_entry(
                     manifest,
                     pid,
@@ -457,9 +457,9 @@ def run_proxy_phase(manifest: dict, settings: dict, dl_timeout: int, dl_retries:
 
     for pid, proxied_url in tqdm(candidates, desc="Institutional Proxy", unit="paper"):
         output_path = PDF_DIR / f"{pid}.pdf"
-        success = download_pdf(proxied_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
+        result = download_pdf(proxied_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
 
-        if success:
+        if result == "ok":
             update_entry(
                 manifest,
                 pid,
@@ -499,8 +499,8 @@ def run_scihub_phase(manifest: dict, settings: dict, dl_timeout: int, dl_retries
 
         if pdf_url:
             output_path = PDF_DIR / f"{pid}.pdf"
-            success = download_pdf(pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
-            if success:
+            result = download_pdf(pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
+            if result == "ok":
                 update_entry(
                     manifest,
                     pid,
@@ -641,12 +641,48 @@ def download(
             click.echo(f"\n--- Phase 1: Open Access ({len(pending_oa)} papers) ---")
             downloaded = 0
             failed = 0
+            left_pending = 0
 
             for paper_id, url in tqdm(pending_oa.items(), desc="Open Access", unit="paper"):
                 output_path = PDF_DIR / f"{paper_id}.pdf"
-                success = download_pdf(url, output_path, timeout=dl_timeout, max_retries=dl_retries)
 
-                if success:
+                # Pre-resolve doi.org URLs: follow redirects and try publisher transforms
+                if "doi.org" in urlparse(url).hostname or "":
+                    transform_urls = get_transform_urls(url)
+                    doi_resolved = False
+                    for alt_url in transform_urls:
+                        result = download_pdf(alt_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
+                        if result == "ok":
+                            update_entry(
+                                manifest,
+                                paper_id,
+                                status="downloaded",
+                                source="open_access",
+                                url=alt_url,
+                                file_path=str(output_path.relative_to(PDF_DIR.parent.parent)),
+                            )
+                            downloaded += 1
+                            doi_resolved = True
+                            break
+                        time.sleep(dl_delay)
+
+                    if doi_resolved:
+                        save_manifest(manifest, manifest_path)
+                        time.sleep(dl_delay)
+                        continue
+
+                    # doi.org URL couldn't be resolved to PDF — leave as pending for Unpaywall
+                    logger.info(f"doi.org URL unresolvable, leaving pending for Unpaywall: {url}")
+                    update_entry(manifest, paper_id, status="pending", source="open_access", url=url)
+                    left_pending += 1
+                    save_manifest(manifest, manifest_path)
+                    time.sleep(dl_delay)
+                    continue
+
+                # Normal (non-doi.org) download
+                result = download_pdf(url, output_path, timeout=dl_timeout, max_retries=dl_retries)
+
+                if result == "ok":
                     update_entry(
                         manifest,
                         paper_id,
@@ -656,14 +692,22 @@ def download(
                         file_path=str(output_path.relative_to(PDF_DIR.parent.parent)),
                     )
                     downloaded += 1
+                elif result == "not_pdf":
+                    # Server returned HTML instead of PDF — leave as pending for later phases
+                    logger.info(f"OA URL returned non-PDF content, leaving pending: {url}")
+                    update_entry(manifest, paper_id, status="pending", source="open_access", url=url)
+                    left_pending += 1
                 else:
+                    # HTTP error (403, timeout, etc.) — mark as failed
                     update_entry(manifest, paper_id, status="failed", source="open_access", url=url)
                     failed += 1
 
                 save_manifest(manifest, manifest_path)
                 time.sleep(dl_delay)
 
-            click.echo(f"Open Access phase: {downloaded} downloaded, {failed} failed")
+            click.echo(
+                f"Open Access phase: {downloaded} downloaded, {failed} failed, {left_pending} left pending (non-PDF)"
+            )
         else:
             click.echo("\nNo pending open access papers to download.")
 
@@ -734,7 +778,7 @@ def download(
                     not_found += 1
                 else:
                     output_path = PDF_DIR / f"{paper_id}.pdf"
-                    success = download_pdf(
+                    result = download_pdf(
                         url=pdf_url,
                         output_path=output_path,
                         timeout=dl_timeout,
@@ -742,7 +786,7 @@ def download(
                         referer="https://scholar.google.com/",
                     )
 
-                    if success:
+                    if result == "ok":
                         update_entry(
                             manifest,
                             paper_id,

@@ -6,7 +6,7 @@ Download PDFs for 408 literature-based discovery papers identified via Semantic 
 ## Project Structure
 ```
 lbd-systematic-review/
-├── pyproject.toml              # Dependencies: click, requests, scholarly, pyyaml, tqdm
+├── pyproject.toml              # Dependencies: click, curl_cffi, requests, scholarly, pyyaml, tqdm
 ├── config/
 │   └── settings.yaml           # Source JSON path, all phase settings
 ├── data/
@@ -18,7 +18,7 @@ lbd-systematic-review/
 │   │   ├── file_paths.py       # Central path management
 │   │   └── log.py              # get_logger() setup
 │   ├── doi.py                  # DOI extraction (disclaimer text) + S2 batch API lookup
-│   ├── download.py             # HTTP download with retries + PDF validation + URL transforms
+│   ├── download.py             # HTTP download with retries + curl_cffi fallback + PDF validation + URL transforms
 │   ├── unpaywall.py            # Unpaywall API lookup for legal OA PDF URLs
 │   ├── scholar.py              # Google Scholar PDF lookup via scholarly
 │   ├── vpn.py                  # ExpressVPN IP rotation (proactive + reactive)
@@ -93,8 +93,8 @@ uv run python scripts/download_papers.py stats
 1. Source: `../automated-discovery_literature-search/results/20260203_110525/papers/category_literature_based_discovery.json`
 2. Papers loaded -> manifest initialized (pending status for new papers)
 3. Phase 0: DOI enrichment (extract from metadata/disclaimer + S2 batch API)
-4. Phase 1: Download from `openAccessPdf.url` where available
-5. Phase 2: Unpaywall lookup for pending papers with DOIs
+4. Phase 1: Download from `openAccessPdf.url` where available (doi.org URLs pre-resolved; non-PDF responses left as "pending")
+5. Phase 2: Unpaywall lookup for pending AND failed papers with DOIs
 6. Phase 3: URL transforms for failed PMC/bioRxiv/MDPI papers
 7. Phase 4: Google Scholar search by title (with optional VPN rotation)
 8. Phase 5: Repository APIs — CORE.ac.uk, EuropePMC, arXiv, OpenAlex (failed/not_found papers)
@@ -137,7 +137,14 @@ Applied to failed papers with stored URLs. Supported domains:
 - **IEEE**: `/document/{id}` → `/stampPDF/getPDF.jsp?arnumber={id}`
 - **ACM**: `/doi/` → `/doi/pdf/`
 - **OUP**: Append `?pdfformat=full`
+- **Elsevier/ScienceDirect**: `/science/article/pii/...` → append `/pdfft`
+- **Wiley**: `/doi/...` → `/doi/pdfdirect/...`
+- **Taylor & Francis**: `/doi/abs/` or `/doi/full/` → `/doi/pdf/`
+- **Hindawi**: article URL → `downloads.hindawi.com/.../article.pdf`
 - **doi.org**: Follow redirect chain, apply matching transform to final URL
+
+## Anti-Bot Handling
+`download_pdf()` returns `"ok"`, `"not_pdf"`, or `"error"` (not bool). On 403 responses (bot detection), automatically retries with `curl_cffi` using Chrome TLS fingerprinting (`impersonate="chrome"`). This bypasses Cloudflare and similar TLS-fingerprint-based blocking used by MDPI, Hindawi, and ScienceOpen.
 
 ## VPN IP Rotation
 The `--use-vpn` flag enables ExpressVPN-based IP rotation during the Scholar and CORE phases to avoid rate limiting.
@@ -159,7 +166,7 @@ The `--use-vpn` flag enables ExpressVPN-based IP rotation during the Scholar and
 ## Configuration
 All settings in `config/settings.yaml`:
 - `download.delay_seconds`: Delay between HTTP downloads (default: 1s)
-- `download.timeout`: HTTP timeout (default: 30s)
+- `download.timeout`: HTTP timeout (default: 60s)
 - `download.max_retries`: Retry count with exponential backoff (default: 3)
 - `s2_api.batch_size`: Papers per S2 batch API request (default: 500)
 - `s2_api.delay_seconds`: Delay between S2 batch requests (default: 1s)
