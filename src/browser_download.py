@@ -116,7 +116,7 @@ async def _download_pdf_async(url: str, output_path: Path, timeout: int = 60) ->
 
             for selector in download_selectors:
                 try:
-                    elements = await page.query_selector_all(selector)
+                    elements = await page.select_all(selector)
                     if elements:
                         await elements[0].click()
                         await asyncio.sleep(5)  # Wait for download

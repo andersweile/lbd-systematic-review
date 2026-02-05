@@ -224,6 +224,8 @@ def get_transform_urls(url: str) -> list[str]:
         if not path.endswith(".pdf"):
             # Remove trailing slash and any existing ".full" suffix
             clean_path = path.rstrip("/").removesuffix(".full")
+            # Strip existing version suffix (v1, v2, etc.) to avoid duplicates like v1v1
+            clean_path = re.sub(r"v\d+$", "", clean_path)
             # Try versioned URLs first (bioRxiv requires explicit version to avoid Cloudflare 403)
             for version in ["v1", "v2", "v3"]:
                 alternatives.append(f"https://{domain}{clean_path}{version}.full.pdf")
