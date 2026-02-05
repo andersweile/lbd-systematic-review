@@ -6,7 +6,7 @@ Download PDFs for 408 literature-based discovery papers identified via Semantic 
 ## Project Structure
 ```
 paper-downloader/
-├── pyproject.toml              # Dependencies: click, curl_cffi, requests, scholarly, pyyaml, tqdm
+├── pyproject.toml              # Dependencies: click, curl_cffi, requests, scholarly, pyyaml, tqdm, nodriver
 ├── config/
 │   └── settings.yaml           # Source JSON path, all phase settings
 ├── data/
@@ -18,7 +18,8 @@ paper-downloader/
 │   │   ├── file_paths.py       # Central path management
 │   │   └── log.py              # get_logger() setup
 │   ├── doi.py                  # DOI extraction (disclaimer text) + S2 batch API lookup
-│   ├── download.py             # HTTP download with retries + curl_cffi fallback + PDF validation + URL transforms
+│   ├── download.py             # HTTP download with retries + curl_cffi fallback + browser fallback + PDF validation + URL transforms
+│   ├── browser_download.py     # Browser-based PDF download using nodriver for Cloudflare bypass
 │   ├── unpaywall.py            # Unpaywall API lookup for legal OA PDF URLs
 │   ├── scholar.py              # Google Scholar PDF lookup via scholarly
 │   ├── vpn.py                  # ExpressVPN IP rotation (proactive + reactive)
@@ -82,6 +83,9 @@ uv run python scripts/download_papers.py download --use-scihub
 # Full recovery run (retry everything through all new phases)
 uv run python scripts/download_papers.py download --retry-failed --retry-not-found
 
+# Disable browser automation (enabled by default)
+uv run python scripts/download_papers.py download --no-browser
+
 # Export remaining papers for manual download
 uv run python scripts/download_papers.py export-remaining
 
@@ -131,7 +135,7 @@ Each entry stores: `title`, `authors`, `year`, `doi`, `status`, `source`, `url`,
 ## URL Transforms
 Applied to failed papers with stored URLs. Supported domains:
 - **PMC**: `/pmc/articles/PMC12345/` → Multiple endpoints (EuropePMC, NCBI direct PDF)
-- **bioRxiv/medRxiv**: Append `.full.pdf`
+- **bioRxiv/medRxiv**: Try versioned URLs (`v1.full.pdf`, `v2.full.pdf`, `v3.full.pdf`) to bypass Cloudflare 403s
 - **MDPI**: Append `/pdf`
 - **Springer**: `/article/` → `/content/pdf/{doi}.pdf`
 - **IEEE**: `/document/{id}` → `/stampPDF/getPDF.jsp?arnumber={id}`
@@ -144,7 +148,18 @@ Applied to failed papers with stored URLs. Supported domains:
 - **doi.org**: Follow redirect chain, apply matching transform to final URL
 
 ## Anti-Bot Handling
-`download_pdf()` returns `"ok"`, `"not_pdf"`, or `"error"` (not bool). On 403 responses (bot detection), automatically retries with `curl_cffi` using Chrome TLS fingerprinting (`impersonate="chrome"`). This bypasses Cloudflare and similar TLS-fingerprint-based blocking used by MDPI, Hindawi, and ScienceOpen.
+`download_pdf()` returns `"ok"`, `"not_pdf"`, or `"error"` (not bool). Multi-layer fallback for blocked downloads:
+
+1. **requests**: Standard HTTP download with browser-like headers
+2. **curl_cffi**: On 403, retry with Chrome TLS fingerprinting (`impersonate="chrome"`) to bypass TLS-fingerprint-based blocking
+3. **nodriver**: On persistent blocks from Cloudflare JS-challenge domains, use headless Chrome browser automation
+
+**Browser-priority domains** (automatic browser fallback when blocked):
+- `sciencedirect.com`, `academic.oup.com`, `dl.acm.org`
+- `emerald.com`, `tandfonline.com`, `onlinelibrary.wiley.com`
+- `downloads.hindawi.com`, `link.springer.com`
+
+Browser automation is enabled by default. Disable with `--no-browser` or `download.use_browser: false` in settings.
 
 ## VPN IP Rotation
 The `--use-vpn` flag enables ExpressVPN-based IP rotation during the Scholar and CORE phases to avoid rate limiting.
@@ -168,6 +183,7 @@ All settings in `config/settings.yaml`:
 - `download.delay_seconds`: Delay between HTTP downloads (default: 1s)
 - `download.timeout`: HTTP timeout (default: 60s)
 - `download.max_retries`: Retry count with exponential backoff (default: 3)
+- `download.use_browser`: Enable browser automation for Cloudflare-protected sites (default: true)
 - `s2_api.batch_size`: Papers per S2 batch API request (default: 500)
 - `s2_api.delay_seconds`: Delay between S2 batch requests (default: 1s)
 - `unpaywall.email`: Contact email for Unpaywall API (required)

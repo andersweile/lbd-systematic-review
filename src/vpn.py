@@ -64,9 +64,7 @@ class VPNSwitcher:
     def is_available(self) -> bool:
         """Check if the ExpressVPN CLI tool is installed and accessible."""
         try:
-            result = subprocess.run(
-                [self.tool, "--version"], capture_output=True, text=True, timeout=5
-            )
+            result = subprocess.run([self.tool, "--version"], capture_output=True, text=True, timeout=5)
             return result.returncode == 0
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
@@ -85,9 +83,7 @@ class VPNSwitcher:
     def get_status(self) -> VPNStatus:
         """Get current VPN connection status."""
         try:
-            result = subprocess.run(
-                [self.tool, "status"], capture_output=True, text=True, timeout=10
-            )
+            result = subprocess.run([self.tool, "status"], capture_output=True, text=True, timeout=10)
             output = result.stdout.strip().lower()
 
             connected = "connected" in output and "not connected" not in output
@@ -125,7 +121,9 @@ class VPNSwitcher:
         try:
             result = subprocess.run(
                 [self.tool, "connect", location],
-                capture_output=True, text=True, timeout=self.connection_timeout,
+                capture_output=True,
+                text=True,
+                timeout=self.connection_timeout,
             )
             if result.returncode == 0:
                 logger.info(f"VPN connected to: {location}")

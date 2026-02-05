@@ -122,7 +122,12 @@ def _download_with_curl_cffi(url: str, output_path: Path, timeout: int, referer:
 
 
 def download_pdf(
-    url: str, output_path: Path, timeout: int = 30, max_retries: int = 3, referer: str | None = None
+    url: str,
+    output_path: Path,
+    timeout: int = 30,
+    max_retries: int = 3,
+    referer: str | None = None,
+    use_browser: bool = False,
 ) -> str:
     """Download a PDF from url to output_path with retries and curl_cffi fallback.
 
@@ -132,6 +137,7 @@ def download_pdf(
         timeout: Timeout in seconds for HTTP request
         max_retries: Number of retry attempts
         referer: Optional Referer header (e.g., "https://scholar.google.com/" for Scholar results)
+        use_browser: If True, try browser automation for Cloudflare-protected domains
 
     Returns:
         "ok" if download succeeded and file is a valid PDF,
@@ -150,8 +156,31 @@ def download_pdf(
             return "ok"
         if cffi_result == "not_pdf":
             return "not_pdf"
-        # curl_cffi also failed — normalize "blocked" to "error"
+
+        # curl_cffi also failed — try browser for known Cloudflare domains
+        if use_browser:
+            from src.browser_download import download_with_browser, should_try_browser
+
+            if should_try_browser(url):
+                logger.info(f"Trying browser fallback for Cloudflare-protected URL: {url}")
+                browser_result = download_with_browser(url, output_path, timeout)
+                if browser_result == "ok":
+                    return "ok"
+                if browser_result == "not_pdf":
+                    return "not_pdf"
+
+        # All fallbacks failed — normalize "blocked" to "error"
         return "error"
+
+    # Also try browser for not_pdf from Cloudflare domains (JS challenge pages)
+    if result == "not_pdf" and use_browser:
+        from src.browser_download import download_with_browser, should_try_browser
+
+        if should_try_browser(url):
+            logger.info(f"Trying browser for non-PDF response from Cloudflare domain: {url}")
+            browser_result = download_with_browser(url, output_path, timeout)
+            if browser_result == "ok":
+                return "ok"
 
     return result
 
@@ -190,10 +219,15 @@ def get_transform_urls(url: str) -> list[str]:
             # 4. EuropePMC backend PDF
             alternatives.append(f"https://europepmc.org/backend/ptpmcrender.fcgi?accid={pmc_id}&blobtype=pdf")
 
-    # bioRxiv / medRxiv: append .full.pdf if not already present
+    # bioRxiv / medRxiv: Try versioned PDF URLs (Cloudflare blocks versionless .full)
     if "biorxiv.org" in domain or "medrxiv.org" in domain:
         if not path.endswith(".pdf"):
-            clean_path = path.rstrip("/")
+            # Remove trailing slash and any existing ".full" suffix
+            clean_path = path.rstrip("/").removesuffix(".full")
+            # Try versioned URLs first (bioRxiv requires explicit version to avoid Cloudflare 403)
+            for version in ["v1", "v2", "v3"]:
+                alternatives.append(f"https://{domain}{clean_path}{version}.full.pdf")
+            # Also try versionless as fallback (works for some older papers)
             alternatives.append(f"https://{domain}{clean_path}.full.pdf")
 
     # MDPI: append /pdf to article URL

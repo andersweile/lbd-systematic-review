@@ -97,7 +97,9 @@ def enrich_dois(papers: list[dict], manifest: dict, settings: dict) -> None:
     click.echo(f"  Total papers with DOI: {total_with_doi}/{len(manifest)}")
 
 
-def run_unpaywall_phase(manifest: dict, settings: dict, dl_timeout: int, dl_retries: int, dl_delay: float) -> None:
+def run_unpaywall_phase(
+    manifest: dict, settings: dict, dl_timeout: int, dl_retries: int, dl_delay: float, use_browser: bool = False
+) -> None:
     """Phase 2: Query Unpaywall for pending/failed papers that have DOIs."""
     unpaywall_settings = settings.get("unpaywall", {})
     email = unpaywall_settings.get("email", "")
@@ -126,7 +128,7 @@ def run_unpaywall_phase(manifest: dict, settings: dict, dl_timeout: int, dl_retr
             continue  # Leave as pending for Scholar phase
 
         output_path = PDF_DIR / f"{paper_id}.pdf"
-        result = download_pdf(pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
+        result = download_pdf(pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries, use_browser=use_browser)
 
         if result == "ok":
             update_entry(
@@ -147,7 +149,9 @@ def run_unpaywall_phase(manifest: dict, settings: dict, dl_timeout: int, dl_retr
     click.echo(f"  Unpaywall: {downloaded} downloaded, {no_pdf} no PDF found (still pending)")
 
 
-def run_url_transform_phase(manifest: dict, dl_timeout: int, dl_retries: int, dl_delay: float) -> None:
+def run_url_transform_phase(
+    manifest: dict, dl_timeout: int, dl_retries: int, dl_delay: float, use_browser: bool = False
+) -> None:
     """Phase 3/6: Retry failed papers using domain-specific URL transforms."""
     # Find failed papers that have a URL we can try to transform
     candidates = []
@@ -167,7 +171,9 @@ def run_url_transform_phase(manifest: dict, dl_timeout: int, dl_retries: int, dl
     for paper_id, original_url, alt_urls in tqdm(candidates, desc="URL Transforms", unit="paper"):
         for alt_url in alt_urls:
             output_path = PDF_DIR / f"{paper_id}.pdf"
-            result = download_pdf(alt_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
+            result = download_pdf(
+                alt_url, output_path, timeout=dl_timeout, max_retries=dl_retries, use_browser=use_browser
+            )
 
             if result == "ok":
                 update_entry(
@@ -194,6 +200,7 @@ def run_repo_api_phase(
     dl_delay: float,
     vpn=None,
     include_pending: bool = False,
+    use_browser: bool = False,
 ) -> None:
     """Phase 5: Search open repository APIs (CORE, EuropePMC, arXiv, OpenAlex).
 
@@ -284,7 +291,9 @@ def run_repo_api_phase(
 
         if pdf_url:
             output_path = PDF_DIR / f"{pid}.pdf"
-            result = download_pdf(pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
+            result = download_pdf(
+                pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries, use_browser=use_browser
+            )
             if result == "ok":
                 update_entry(
                     manifest,
@@ -315,7 +324,9 @@ def run_repo_api_phase(
 
         if pdf_url:
             output_path = PDF_DIR / f"{pid}.pdf"
-            result = download_pdf(pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
+            result = download_pdf(
+                pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries, use_browser=use_browser
+            )
             if result == "ok":
                 update_entry(
                     manifest,
@@ -345,7 +356,9 @@ def run_repo_api_phase(
 
         if pdf_url:
             output_path = PDF_DIR / f"{pid}.pdf"
-            result = download_pdf(pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
+            result = download_pdf(
+                pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries, use_browser=use_browser
+            )
             if result == "ok":
                 update_entry(
                     manifest,
@@ -376,7 +389,9 @@ def run_repo_api_phase(
 
         if pdf_url:
             output_path = PDF_DIR / f"{pid}.pdf"
-            result = download_pdf(pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
+            result = download_pdf(
+                pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries, use_browser=use_browser
+            )
             if result == "ok":
                 update_entry(
                     manifest,
@@ -396,7 +411,9 @@ def run_repo_api_phase(
     )
 
 
-def run_crossref_phase(manifest: dict, settings: dict, dl_timeout: int, dl_retries: int, dl_delay: float) -> None:
+def run_crossref_phase(
+    manifest: dict, settings: dict, dl_timeout: int, dl_retries: int, dl_delay: float, use_browser: bool = False
+) -> None:
     """Phase 7: Crossref DOI content negotiation."""
     from src.crossref import find_pdf_url as crossref_find_pdf_url
 
@@ -417,7 +434,9 @@ def run_crossref_phase(manifest: dict, settings: dict, dl_timeout: int, dl_retri
 
         if pdf_url:
             output_path = PDF_DIR / f"{pid}.pdf"
-            result = download_pdf(pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
+            result = download_pdf(
+                pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries, use_browser=use_browser
+            )
             if result == "ok":
                 update_entry(
                     manifest,
@@ -434,7 +453,9 @@ def run_crossref_phase(manifest: dict, settings: dict, dl_timeout: int, dl_retri
     click.echo(f"  Crossref: {downloaded} downloaded")
 
 
-def run_proxy_phase(manifest: dict, settings: dict, dl_timeout: int, dl_retries: int, dl_delay: float) -> None:
+def run_proxy_phase(
+    manifest: dict, settings: dict, dl_timeout: int, dl_retries: int, dl_delay: float, use_browser: bool = False
+) -> None:
     """Phase 8: Retry paywall papers through institutional proxy."""
     from src.proxy import get_proxy_candidates
 
@@ -457,7 +478,9 @@ def run_proxy_phase(manifest: dict, settings: dict, dl_timeout: int, dl_retries:
 
     for pid, proxied_url in tqdm(candidates, desc="Institutional Proxy", unit="paper"):
         output_path = PDF_DIR / f"{pid}.pdf"
-        result = download_pdf(proxied_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
+        result = download_pdf(
+            proxied_url, output_path, timeout=dl_timeout, max_retries=dl_retries, use_browser=use_browser
+        )
 
         if result == "ok":
             update_entry(
@@ -476,7 +499,9 @@ def run_proxy_phase(manifest: dict, settings: dict, dl_timeout: int, dl_retries:
     click.echo(f"  Institutional proxy: {downloaded} downloaded")
 
 
-def run_scihub_phase(manifest: dict, settings: dict, dl_timeout: int, dl_retries: int, dl_delay: float) -> None:
+def run_scihub_phase(
+    manifest: dict, settings: dict, dl_timeout: int, dl_retries: int, dl_delay: float, use_browser: bool = False
+) -> None:
     """Phase 9: Sci-Hub lookup (opt-in only)."""
     from src.scihub import find_pdf_url as scihub_find_pdf_url
 
@@ -499,7 +524,9 @@ def run_scihub_phase(manifest: dict, settings: dict, dl_timeout: int, dl_retries
 
         if pdf_url:
             output_path = PDF_DIR / f"{pid}.pdf"
-            result = download_pdf(pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
+            result = download_pdf(
+                pdf_url, output_path, timeout=dl_timeout, max_retries=dl_retries, use_browser=use_browser
+            )
             if result == "ok":
                 update_entry(
                     manifest,
@@ -535,6 +562,11 @@ def cli():
 @click.option("--retry-not-found", is_flag=True, help="Retry papers marked as 'not_found' (reset them to pending).")
 @click.option("--unpaywall-email", type=str, default=None, help="Email for Unpaywall API (overrides settings.yaml).")
 @click.option("--skip-unpaywall", is_flag=True, help="Skip the Unpaywall phase.")
+@click.option(
+    "--use-browser/--no-browser",
+    default=None,
+    help="Use browser for Cloudflare-protected sites (default: from settings).",
+)
 def download(
     open_access_only: bool,
     scholar_only: bool,
@@ -548,12 +580,19 @@ def download(
     retry_not_found: bool,
     unpaywall_email: str | None,
     skip_unpaywall: bool,
+    use_browser: bool | None,
 ):
     """Download PDFs for all papers in the source dataset."""
     settings = load_settings()
     manifest_path = get_manifest_path()
     dl_settings = settings.get("download", {})
     scholar_settings = settings.get("scholar", {})
+
+    # Determine browser usage: CLI flag overrides settings.yaml
+    if use_browser is None:
+        use_browser = dl_settings.get("use_browser", True)
+    if use_browser:
+        click.echo("Browser automation enabled for Cloudflare-protected sites.")
 
     if scholar_delay is None:
         scholar_delay = scholar_settings.get("delay_seconds", 10.0)
@@ -620,7 +659,14 @@ def download(
         # Include pending papers if retry flags were used (they reset status to pending)
         include_pending = retry_failed or retry_not_found
         run_repo_api_phase(
-            manifest, settings, dl_timeout, dl_retries, dl_delay, vpn=vpn, include_pending=include_pending
+            manifest,
+            settings,
+            dl_timeout,
+            dl_retries,
+            dl_delay,
+            vpn=vpn,
+            include_pending=include_pending,
+            use_browser=use_browser,
         )
         save_manifest(manifest, manifest_path)
         click.echo(f"\nFinal status: {dict(count_by_status(manifest))}")
@@ -651,7 +697,9 @@ def download(
                     transform_urls = get_transform_urls(url)
                     doi_resolved = False
                     for alt_url in transform_urls:
-                        result = download_pdf(alt_url, output_path, timeout=dl_timeout, max_retries=dl_retries)
+                        result = download_pdf(
+                            alt_url, output_path, timeout=dl_timeout, max_retries=dl_retries, use_browser=use_browser
+                        )
                         if result == "ok":
                             update_entry(
                                 manifest,
@@ -680,7 +728,9 @@ def download(
                     continue
 
                 # Normal (non-doi.org) download
-                result = download_pdf(url, output_path, timeout=dl_timeout, max_retries=dl_retries)
+                result = download_pdf(
+                    url, output_path, timeout=dl_timeout, max_retries=dl_retries, use_browser=use_browser
+                )
 
                 if result == "ok":
                     update_entry(
@@ -714,13 +764,13 @@ def download(
     # --- Phase 2: Unpaywall ---
     if not open_access_only and not skip_unpaywall:
         click.echo("\n--- Phase 2: Unpaywall ---")
-        run_unpaywall_phase(manifest, settings, dl_timeout, dl_retries, dl_delay)
+        run_unpaywall_phase(manifest, settings, dl_timeout, dl_retries, dl_delay, use_browser=use_browser)
         save_manifest(manifest, manifest_path)
 
     # --- Phase 3: URL Transforms ---
     if not scholar_only and not open_access_only:
         click.echo("\n--- Phase 3: URL Transforms ---")
-        run_url_transform_phase(manifest, dl_timeout, dl_retries, dl_delay)
+        run_url_transform_phase(manifest, dl_timeout, dl_retries, dl_delay, use_browser=use_browser)
         save_manifest(manifest, manifest_path)
 
     # --- Phase 4: Google Scholar ---
@@ -784,6 +834,7 @@ def download(
                         timeout=dl_timeout,
                         max_retries=dl_retries,
                         referer="https://scholar.google.com/",
+                        use_browser=use_browser,
                     )
 
                     if result == "ok":
@@ -814,31 +865,31 @@ def download(
     # --- Phase 5: Repository APIs (CORE, EuropePMC, arXiv) ---
     if not open_access_only and not scholar_only:
         click.echo("\n--- Phase 5: Repository APIs ---")
-        run_repo_api_phase(manifest, settings, dl_timeout, dl_retries, dl_delay, vpn=vpn)
+        run_repo_api_phase(manifest, settings, dl_timeout, dl_retries, dl_delay, vpn=vpn, use_browser=use_browser)
         save_manifest(manifest, manifest_path)
 
     # --- Phase 6: Expanded URL Transforms (re-run on failed with new transforms) ---
     if not open_access_only and not scholar_only:
         click.echo("\n--- Phase 6: Expanded URL Transforms ---")
-        run_url_transform_phase(manifest, dl_timeout, dl_retries, dl_delay)
+        run_url_transform_phase(manifest, dl_timeout, dl_retries, dl_delay, use_browser=use_browser)
         save_manifest(manifest, manifest_path)
 
     # --- Phase 7: Crossref Content Negotiation ---
     if not open_access_only and not scholar_only:
         click.echo("\n--- Phase 7: Crossref Content Negotiation ---")
-        run_crossref_phase(manifest, settings, dl_timeout, dl_retries, dl_delay)
+        run_crossref_phase(manifest, settings, dl_timeout, dl_retries, dl_delay, use_browser=use_browser)
         save_manifest(manifest, manifest_path)
 
     # --- Phase 8: Institutional Proxy (opt-in) ---
     if use_proxy_institutional:
         click.echo("\n--- Phase 8: Institutional Proxy ---")
-        run_proxy_phase(manifest, settings, dl_timeout, dl_retries, dl_delay)
+        run_proxy_phase(manifest, settings, dl_timeout, dl_retries, dl_delay, use_browser=use_browser)
         save_manifest(manifest, manifest_path)
 
     # --- Phase 9: Sci-Hub (opt-in) ---
     if use_scihub:
         click.echo("\n--- Phase 9: Sci-Hub ---")
-        run_scihub_phase(manifest, settings, dl_timeout, dl_retries, dl_delay)
+        run_scihub_phase(manifest, settings, dl_timeout, dl_retries, dl_delay, use_browser=use_browser)
         save_manifest(manifest, manifest_path)
 
     # --- Summary ---

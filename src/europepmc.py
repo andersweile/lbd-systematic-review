@@ -50,8 +50,8 @@ def find_pdf_url(doi: str | None = None, title: str | None = None, delay: float 
             for result in results:
                 pmcid = result.get("pmcid")
                 if pmcid:
-                    # Direct full text PDF endpoint
-                    pdf_url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextPDF"
+                    # Use backend PDF renderer (the REST endpoint returns 404)
+                    pdf_url = f"https://europepmc.org/backend/ptpmcrender.fcgi?accid={pmcid}&blobtype=pdf"
                     logger.info(f"EuropePMC: found PMC PDF for {pmcid}")
                     return pdf_url
 

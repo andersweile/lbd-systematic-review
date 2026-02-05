@@ -10,6 +10,7 @@ dependencies = [
     "scholarly",
     "pyyaml",
     "tqdm",
+    "nodriver",  # Browser automation for Cloudflare bypass
 ]
 
 [tool.ruff]
